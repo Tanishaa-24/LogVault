@@ -1,0 +1,74 @@
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: logvault-cassandra
+    environment:
+      - CASSANDRA_CLUSTER_NAME=logvault
+      - CASSANDRA_DC=dc1
+      - CASSANDRA_ENDPOINT_SNITCH=SimpleSnitch
+      - HEAP_NEWSIZE=128M
+      - MAX_HEAP_SIZE=512M
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  cassandra-init:
+    image: cassandra:4.1
+    container_name: logvault-cassandra-init
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./backend/schema.cql:/schema.cql:ro
+      - ./cassandra-init/seed.cql:/seed.cql:ro
+    entrypoint: >
+      bash -c "
+        for i in {1..30}; do
+          cqlsh cassandra -e 'DESCRIBE KEYSPACES' > /dev/null 2>&1 && break;
+          echo \"Waiting for Cassandra CQL (attempt $$i)...\";
+          sleep 3;
+        done;
+        echo 'Applying schema...' &&
+        cqlsh cassandra -f /schema.cql &&
+        echo 'Seeding demo apps...' &&
+        cqlsh cassandra -f /seed.cql &&
+        echo 'Init done.'
+      "
+    restart: "no"
+
+  backend:
+    build: ./backend
+    container_name: logvault-backend
+    environment:
+      - CASSANDRA_HOSTS=cassandra
+      - CASSANDRA_PORT=9042
+      - CASSANDRA_KEYSPACE=logvault
+      - EVENT_TTL_SECONDS=2592000
+      - SPIKE_MULTIPLIER=5.0
+      - SPIKE_LOOKBACK_HOURS=24
+      - LOG_LEVEL=INFO
+    ports:
+      - "5000:5000"
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+
+  frontend:
+    build: ./frontend
+    container_name: logvault-frontend
+    environment:
+      - VITE_API_URL=http://backend:5000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  cassandra_data:
